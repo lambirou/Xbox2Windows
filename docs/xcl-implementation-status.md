@@ -12,7 +12,7 @@ action. Details and evidence belong in the change or its pull request, not here.
 
 | ID | Branch | Local commit | State | First failure | Next action |
 | --- | --- | --- | --- | --- | --- |
-| XCL-00 | `docs/xcl-reference` | `7168565` plus status | Local, rebased on `ee04692`; PR pending | None | Push the branch and open the PR. |
+| XCL-00 | `docs/xcl-reference` | `7168565` plus status | [PR #1027](https://github.com/R0Y00/Xbox2Windows/pull/1027) open | None | Review and merge. |
 | XCL-01 | `tools/compat-report` | Pending | In progress; depends on XCL-00 | None yet | Add the deterministic import report and its synthetic PE test. |
 | XCL-14 | None | None | Analysis complete; no branch | Depends on the XCL-01 report schema | Start after XCL-01 is merged. |
 
@@ -26,12 +26,11 @@ rebased after its prerequisite lands.
 - XCL-00 changes documentation only. It does not establish a runtime measurement.
 - XCL-01, XCL-02, XCL-03, XCL-04 to XCL-13, XCL-14 to XCL-23 and the later items remain open in
   the capability matrix.
-- The local GitHub CLI token is invalid. Branch pushes use the fork's SSH remote; opening a pull
-  request needs an authenticated GitHub session.
+- One pull request is open, below the limit of four.
 
 ## Next actions
 
-1. Merge XCL-00 after review.
+1. Merge [XCL-00](https://github.com/R0Y00/Xbox2Windows/pull/1027) after review.
 2. Rebase XCL-01 on the new `main`, run
    `out\pe-env\Scripts\python.exe -B tests\compat_report_check.py`, and open it.
 3. After XCL-01 merges, start XCL-14 from the shared report schema in the analysis, then the
