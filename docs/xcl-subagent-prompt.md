@@ -157,4 +157,3 @@ debug layer. Un skip n'est ni un pass ni un fail.
 2. Ouvrir XCL-00 puis XCL-01.
 3. Lancer E sur XCL-14 en lecture seule (corpus et schema), sans modifier les fichiers de A.
 4. Annoncer le premier point de blocage apres trois PRs, avec les commandes et les resultats.
-
