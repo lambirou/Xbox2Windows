@@ -10347,6 +10347,10 @@ BVH_HELPERS = (
     '    h1 = h1 && c1 != X2W_BVH_MISS;',
     '    h2 = h2 && c2 != X2W_BVH_MISS;',
     '    h3 = h3 && c3 != X2W_BVH_MISS;',
+    '    c0 = h0 ? c0 : X2W_BVH_MISS;',
+    '    c1 = h1 ? c1 : X2W_BVH_MISS;',
+    '    c2 = h2 ? c2 : X2W_BVH_MISS;',
+    '    c3 = h3 ? c3 : X2W_BVH_MISS;',
     # A disabled sort uses one key for every hit: the network then only compacts misses,
     # while an enabled sort orders the hits by entry distance.
     '    float k0 = h0 ? (sort_boxes ? d0 : 0.0) : 3.402823466e+38;',

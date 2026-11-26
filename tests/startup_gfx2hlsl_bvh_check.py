@@ -265,7 +265,100 @@ def compile_check(hlsl):
     return True
 
 
+
+
+def ffloat(value):
+    return "asfloat(0x%08xu)" % struct.unpack("<I", struct.pack("<f", value))[0]
+
+
+def fbits(value):
+    return "0x%08xu" % struct.unpack("<I", struct.pack("<f", value))[0]
+
+
+def dispatch_hlsl(mutate_miss=False):
+    helpers = "\n".join(G.BVH_HELPERS).replace("ByteAddressBuffer", "RWByteAddressBuffer")
+    if mutate_miss:
+        for i in range(4):
+            helpers = helpers.replace("c%d = h%d ? c%d : X2W_BVH_MISS;" % (i, i, i), "c%d = c%d;" % (i, i))
+    lines = [helpers, "RWByteAddressBuffer data : register(u0);", "[numthreads(1, 1, 1)]", "void main() {"]
+    for base_offset, children in NODES.items():
+        for i, (child, lo, hi) in enumerate(children):
+            lines.append("    data.Store(%du, 0x%08xu);" % (base_offset + 4 * i, child))
+            for j in range(3):
+                lines.append("    data.Store(%du, %s);" % (base_offset + 16 + 24 * i + 4 * j, fbits(lo[j])))
+                lines.append("    data.Store(%du, %s);" % (base_offset + 16 + 24 * i + 12 + 4 * j, fbits(hi[j])))
+        for i in range(4):
+            lines.append("    data.Store(%du, 0u);" % (base_offset + 112 + 4 * i))
+    lines.append("    DeviceMemoryBarrierWithGroupSync();")
+    for case, (_name, offset, extent, origin, direction, _expected) in enumerate(RAYS):
+        inv = tuple(1.0 / c for c in direction)
+        lines.append(
+            "    uint4 r%d = x2w_bvh_intersect_box32(data, 0x%08xu, 0x00100000u, 0x80000000u, "
+            "0x0000000bu, 0x80000000u, %s, float3(%s, %s, %s), float3(%s, %s, %s));" % (
+                case, (offset >> 3) | 5, ffloat(extent), ffloat(origin[0]), ffloat(origin[1]),
+                ffloat(origin[2]), ffloat(inv[0]), ffloat(inv[1]), ffloat(inv[2])))
+        for word in range(4):
+            lines.append("    data.Store(%du, r%d.%s);" % (512 + 16 * case + 4 * word, case, "xyzw"[word]))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def run_dispatch(dxc, runner, adapter, directory, mutate=False):
+    name = "bvh_dispatch_mut" if mutate else "bvh_dispatch"
+    source = directory / (name + ".hlsl")
+    cso = directory / (name + ".cso")
+    output = directory / (name + ".bin")
+    source.write_text(dispatch_hlsl(mutate), encoding="ascii")
+    compiled = subprocess.run([dxc, "-T", "cs_6_0", "-E", "main", "-Fo", str(cso), str(source)],
+                              capture_output=True, text=True)
+    if compiled.returncode or compiled.stderr:
+        raise AssertionError(compiled.stderr or "dxc exited with %d" % compiled.returncode)
+    result = subprocess.run([runner, adapter, "--raw-uav-dump", str(cso), "1", "592", str(output)],
+                            capture_output=True, text=True)
+    print(result.stdout, end="")
+    if result.returncode == 77:
+        return 77, None
+    if result.returncode or result.stderr:
+        raise AssertionError(result.stderr or "offscreen_check exited with %d" % result.returncode)
+    data = output.read_bytes()
+    return 0, struct.unpack("<%dI" % (len(data) // 4), data)
+
+
+def check_dispatch(dxc, runner, adapter):
+    controls()
+    if not dxc or not runner:
+        print("dispatch: skip (no dxc or offscreen_check)")
+        return 77
+    out = ROOT / "out"
+    out.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out) as temporary:
+        directory = Path(temporary)
+        status, words = run_dispatch(dxc, runner, adapter, directory)
+        if status == 77:
+            print("dispatch: skip (adapter unavailable)")
+            return 77
+        for case, (_name, _offset, _extent, _origin, _direction, expected) in enumerate(RAYS):
+            got = tuple(words[128 + 4 * case:132 + 4 * case])
+            check("dispatch case %d %s" % (case, _name), got == expected,
+                  "got %s expected %s" % (["%08x" % w for w in got], ["%08x" % w for w in expected]))
+        status, mutant = run_dispatch(dxc, runner, adapter, directory, mutate=True)
+        if status == 77:
+            print("dispatch control: skip (adapter unavailable)")
+            return 77
+        changed = mutant[128:132]
+        check("dispatch miss-fill control decays case 2", tuple(changed) != (INVALID,) * 4,
+              "got %s" % ["%08x" % w for w in changed])
+    if failures:
+        print("FAILED: %s" % ", ".join(failures))
+        return 1
+    print("dispatch: all ok on %s" % adapter)
+    return 0
+
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == "dispatch":
+        return check_dispatch(sys.argv[2], sys.argv[3], sys.argv[4])
+    if len(sys.argv) != 1:
+        sys.exit(__doc__)
     controls()
     pipe, hlsl, refusals = translate_program()
     assert not refusals, refusals
