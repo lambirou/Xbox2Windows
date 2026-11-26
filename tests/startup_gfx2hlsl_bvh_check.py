@@ -1,10 +1,10 @@
-"""image_bvh_intersect_ray: the FP32 box-node (kind 5) translation slice.
+"""image_bvh_intersect_ray: the FP32 and binary16 box-node translation slice.
 
 The instruction is RDNA 2 MIMG opcode 230. This check covers the translator path and the
 box model only: a constant inline BVH T#[12:15], an 11-dword packed address, a constant
-node base whose low three bits are 5, and the four child results. Triangle nodes, 16-bit
-box nodes, the 64-bit form, A16, NSA and every dynamic descriptor or node base are refused
-by name before any HLSL is emitted. The CPU box reference is the one in
+node base whose low three bits are 4 (binary16) or 5 (FP32), and the four child results.
+Triangle nodes, the 64-bit form, A16, NSA and every dynamic descriptor or node base are
+refused by name before any HLSL is emitted. The CPU box reference is the one in
 tests/gfx1030_bvh_box/check.py; the sort network is the five compare-exchange stages of
 Mesa 25.1.0 radv_nir_rt_common.c (MIT).
 """
@@ -102,6 +102,24 @@ def model(nodes, extent, origin, direction, sort_boxes):
     return tuple(item[0] for item in items)
 
 
+def half_nodes(nodes):
+    """The same nodes with every bound rounded to binary16 before the box test."""
+    quantized = []
+    for child, lo, hi in nodes:
+        def q(value):
+            return struct.unpack("<e", struct.pack("<e", value))[0]
+        quantized.append((child, tuple(q(value) for value in lo), tuple(q(value) for value in hi)))
+    return quantized
+
+
+HALF_BASE = 512
+HALF_NODES = half_nodes(NODES[0])
+HALF_RAYS = tuple(
+    (name, HALF_BASE, extent, origin, direction, reference(HALF_NODES, extent, origin, direction, True))
+    for name, _offset, extent, origin, direction, _expected in RAYS
+)
+
+
 def translate_program(*, node=0x05, sort_boxes=True, word0=0x00100000, word1=None, word2=0x0b,
                       word3=RESOURCE_TYPE, loaded_descriptor=False, modifier="", opcode="image_bvh_intersect_ray",
                       constant_node=True, stage_kind="cs"):
@@ -192,10 +210,22 @@ def controls():
     if pipe is not None:
         check("sort-disabled call uses a zero sort word", "0x00000000u" in hlsl, "")
 
+    half = half_nodes(NODES[0])
+    check("binary16 bounds keep the CPU box result",
+          model(half, 19.0, ORIGIN, FORWARD, True) == reference(half, 19.0, ORIGIN, FORWARD, True),
+          str((model(half, 19.0, ORIGIN, FORWARD, True), reference(half, 19.0, ORIGIN, FORWARD, True))))
+    pipe, hlsl, refusals = translate_program(node=0x04)
+    check("constant box16 program translates", pipe is not None and not refusals, str(refusals))
+    if pipe is not None:
+        check("HLSL contains the binary16 helper",
+              "uint4 x2w_bvh_intersect_box16" in hlsl and "x2w_bvh_box16_slot" in hlsl and "f16tof32" in hlsl, "")
+        call_line = next(line for line in hlsl.splitlines() if "x2w_bvh_intersect_box16(r0" in line)
+        check("box16 call carries the node and four child results",
+              "0x00000004u" in call_line and all("v%d = bt" % reg in hlsl for reg in range(32, 36)), call_line)
+
     # Every refusal must happen before a helper call or a result VGPR is emitted.
     cases = [
         ("triangle node", dict(node=0x00), "triangle node (kind 0)"),
-        ("16-bit box node", dict(node=0x04), "16-bit box node (kind 4)"),
         ("unknown node kind", dict(node=0x06), "node kind 6"),
         ("unaligned node", dict(node=0x0d), "not an aligned 128-byte node"),
         ("non-constant node", dict(constant_node=False), "non-constant node base"),
@@ -206,7 +236,7 @@ def controls():
         ("descriptor type", dict(word3=0x60000000), "descriptor type 6 is not 8"),
         ("box growing", dict(word1=SORT_ENABLE | (2 << 23)), "box growing amount 2"),
         ("base alignment", dict(word0=0x00100008), "not 256-byte aligned"),
-        ("size zero", dict(word2=0), "does not cover a 128-byte node"),
+        ("size zero", dict(word2=0), "does not cover the node"),
         ("node outside size", dict(node=0x25, word2=3), "outside descriptor size"),
         ("absolute base", dict(word0=0, word1=0), "absolute node base"),
         ("size high bits", dict(word3=RESOURCE_TYPE | 0x100), "size above 4 GiB"),
@@ -227,7 +257,8 @@ def controls():
         check("refuses %s" % label, ok, str(refusals))
         if hlsl is not None:
             check("  no partial output for %s" % label,
-                  "uint4 bt" not in hlsl and "x2w_bvh_intersect_box32(r" not in hlsl, "")
+                  "uint4 bt" not in hlsl and "x2w_bvh_intersect_box32(r" not in hlsl and
+                  "x2w_bvh_intersect_box16(r" not in hlsl, "")
 
     pipe, hlsl, refusals = translate_program(stage_kind="ps")
     check("refuses a pixel stage", len(refusals) == 1 and "outside a compute stage" in refusals[0], str(refusals))
@@ -289,6 +320,11 @@ def dispatch_hlsl(mutate_miss=False):
                 lines.append("    data.Store(%du, %s);" % (base_offset + 16 + 24 * i + 12 + 4 * j, fbits(hi[j])))
         for i in range(4):
             lines.append("    data.Store(%du, 0u);" % (base_offset + 112 + 4 * i))
+    for i, (child, lo, hi) in enumerate(HALF_NODES):
+        lines.append("    data.Store(%du, 0x%08xu);" % (HALF_BASE + 4 * i, child))
+        packed = struct.unpack("<3I", struct.pack("<6e", *lo, *hi))
+        for j, word in enumerate(packed):
+            lines.append("    data.Store(%du, 0x%08xu);" % (HALF_BASE + 16 + 12 * i + 4 * j, word))
     lines.append("    DeviceMemoryBarrierWithGroupSync();")
     for case, (_name, offset, extent, origin, direction, _expected) in enumerate(RAYS):
         inv = tuple(1.0 / c for c in direction)
@@ -298,7 +334,16 @@ def dispatch_hlsl(mutate_miss=False):
                 case, (offset >> 3) | 5, ffloat(extent), ffloat(origin[0]), ffloat(origin[1]),
                 ffloat(origin[2]), ffloat(inv[0]), ffloat(inv[1]), ffloat(inv[2])))
         for word in range(4):
-            lines.append("    data.Store(%du, r%d.%s);" % (512 + 16 * case + 4 * word, case, "xyzw"[word]))
+            lines.append("    data.Store(%du, r%d.%s);" % (576 + 16 * case + 4 * word, case, "xyzw"[word]))
+    for case, (_name, offset, extent, origin, direction, _expected) in enumerate(HALF_RAYS):
+        inv = tuple(1.0 / c for c in direction)
+        lines.append(
+            "    uint4 h%d = x2w_bvh_intersect_box16(data, 0x%08xu, 0x00100000u, 0x80000000u, "
+            "0x00000040u, 0x80000000u, %s, float3(%s, %s, %s), float3(%s, %s, %s));" % (
+                case, (offset >> 3) | 4, ffloat(extent), ffloat(origin[0]), ffloat(origin[1]),
+                ffloat(origin[2]), ffloat(inv[0]), ffloat(inv[1]), ffloat(inv[2])))
+        for word in range(4):
+            lines.append("    data.Store(%du, h%d.%s);" % (672 + 16 * case + 4 * word, case, "xyzw"[word]))
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -313,7 +358,7 @@ def run_dispatch(dxc, runner, adapter, directory, mutate=False):
                               capture_output=True, text=True)
     if compiled.returncode or compiled.stderr:
         raise AssertionError(compiled.stderr or "dxc exited with %d" % compiled.returncode)
-    result = subprocess.run([runner, adapter, "--raw-uav-dump", str(cso), "1", "592", str(output)],
+    result = subprocess.run([runner, adapter, "--raw-uav-dump", str(cso), "1", "768", str(output)],
                             capture_output=True, text=True)
     print(result.stdout, end="")
     if result.returncode == 77:
@@ -338,14 +383,18 @@ def check_dispatch(dxc, runner, adapter):
             print("dispatch: skip (adapter unavailable)")
             return 77
         for case, (_name, _offset, _extent, _origin, _direction, expected) in enumerate(RAYS):
-            got = tuple(words[128 + 4 * case:132 + 4 * case])
+            got = tuple(words[144 + 4 * case:148 + 4 * case])
             check("dispatch case %d %s" % (case, _name), got == expected,
+                  "got %s expected %s" % (["%08x" % w for w in got], ["%08x" % w for w in expected]))
+        for case, (_name, _offset, _extent, _origin, _direction, expected) in enumerate(HALF_RAYS):
+            got = tuple(words[168 + 4 * case:172 + 4 * case])
+            check("dispatch box16 case %d %s" % (case, _name), got == expected,
                   "got %s expected %s" % (["%08x" % w for w in got], ["%08x" % w for w in expected]))
         status, mutant = run_dispatch(dxc, runner, adapter, directory, mutate=True)
         if status == 77:
             print("dispatch control: skip (adapter unavailable)")
             return 77
-        changed = mutant[128:132]
+        changed = mutant[144:148]
         check("dispatch miss-fill control decays case 2", tuple(changed) != (INVALID,) * 4,
               "got %s" % ["%08x" % w for w in changed])
     if failures:
@@ -363,10 +412,13 @@ def main():
     pipe, hlsl, refusals = translate_program()
     assert not refusals, refusals
     compile_check(hlsl)
+    pipe, hlsl, refusals = translate_program(node=0x04)
+    assert not refusals, refusals
+    compile_check(hlsl)
     if failures:
         print("FAILED: %s" % ", ".join(failures))
         return 1
-    print("startup gfx2hlsl bvh box32: all ok")
+    print("startup gfx2hlsl bvh box32/box16: all ok")
     return 0
 
 
