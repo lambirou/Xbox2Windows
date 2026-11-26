@@ -34,11 +34,13 @@ def pixel(green):
 def check(directory, consumer, backend):
     cache = directory / "cache"
     cache.mkdir()
+    recipes = directory / "recipes"
+    recipes.mkdir()
     vs, ps, root, output = (directory / name for name in ("vs", "ps", "root", "pixels"))
     vs.write_bytes(vertex())
     args = [consumer, vs, ps, root]
     env = dict(os.environ, X2W_D3D12_PERMISSIVE="1", X2W_D3D12_LIST_NOOP="1", X2W_D3D12_RENDER="1",
-               X2W_SHADER_CACHE=str(cache))
+               X2W_SHADER_CACHE=str(cache), X2W_PSO_RECIPE_DIR=str(recipes))
     env.setdefault("X2W_D3D12_DEBUG", "0")
     observations = []
     for green in (False, True):
@@ -63,6 +65,14 @@ def check(directory, consumer, backend):
         if pixels != expected:
             raise AssertionError(f"actual {pixels.hex()} expected {expected.hex()}")
         observations.append(pixels)
+        # The translated stream draw creates its desktop PSO through pipeline_for. A second
+        # process with the same recipe directory must replay it instead of reconstructing the
+        # state from scratch.
+        assert list(recipes.glob("pso_*.txt")), "the successful draw wrote no PSO recipe"
+        replay = subprocess.run(args + [backend, output], env=env, capture_output=True, text=True)
+        assert replay.returncode == 0, replay.stderr
+        assert "pso recipes" in replay.stderr and "precreated" in replay.stderr, replay.stderr
+        assert output.read_bytes() == pixels, "the recipe replay changed the drawn pixels"
     # Hold back the last-published marker while keeping the generated shader bytecode in place.
     key = gfx2hlsl.pipeline_key(vs.read_bytes(), ps.read_bytes(), root.read_bytes())
     manifest = cache / f"{key:016x}.txt"

@@ -24,6 +24,7 @@
 #include "startup_stubs/pixel_history.h"
 #include "startup_stubs/translated_sampler_bindings.h"
 #include "startup_stubs/export_write_mask.h"
+#include "startup_stubs/pso_recipe.h"
 #include "startup_stubs/depth_state_apply.h"
 #include "startup_stubs/d16_image_format.h"
 #include "startup_stubs/formatted_buffer.h"
@@ -6816,6 +6817,9 @@ HRESULT __stdcall queue_present(Wrapper* self, UINT planes, const void* plane_pa
             heap_root_refusals[static_cast<int>(x2w_startup::RealRootDecision::both_heaps_missing)],
             heap_root_refusals[static_cast<int>(x2w_startup::RealRootDecision::state_not_restorable)], indirect_first_lookups,
             compute_requests_published, compute_requests_present, compute_requests_failed, compute_blob_pointer_words);
+    if (render_mode() && frame % 300 == 0 && (pso_recipes_loaded || pso_recipes_precreated || pso_recipe_mismatches || pso_recipe_fallbacks))
+        log("x2w-draw pso recipes totals: loaded %ld, precreated %ld, mismatches %ld, fallbacks %ld", pso_recipes_loaded,
+            pso_recipes_precreated, pso_recipe_mismatches, pso_recipe_fallbacks);
     if (render_mode() && frame % 300 == 0) {
         log("x2w-render compute dispatches: translated %ld, refused %ld, no translation %ld, not modelled %ld",
             compute_dispatches_translated, compute_dispatches_refused, compute_dispatches_untranslated, compute_dispatches_unmodelled);
