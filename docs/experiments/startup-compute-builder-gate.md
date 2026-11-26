@@ -21,8 +21,9 @@ and state machine are tested without a device or a title module.
 A builder Dispatch is allowed when every tracked builder pipeline has a real desktop PSO. On the
 first builder Dispatch the gate makes the missing pipelines on the spot. If one cannot be made, the
 builder is turned off for the rest of the run and the Dispatch is refused with a named reason. A
-non-builder Dispatch is unchanged. The gate is counted in the compute totals line as
-`builder gate refused N`.
+non-builder Dispatch is unchanged. A placeholder pipeline without a translated compute request key
+keeps its normal request path: the gate applies only once a translation exists. The gate is counted
+in the compute totals line as `builder gate refused N`.
 
 ## Scope and limits
 

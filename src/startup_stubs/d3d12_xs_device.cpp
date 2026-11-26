@@ -3332,7 +3332,10 @@ void __stdcall list_execute_indirect(Wrapper* self, void* signature, UINT count,
     const bool graphics = indexed || mesh || command == IndirectCommand::draw;
     Pass& pass = pass_of(self);
     refusal_pipeline = pass.pipeline;
-    if (command == IndirectCommand::dispatch && !compute_builder_dispatch_allowed(self, "ExecuteIndirect"))
+    // A placeholder builder pipeline still needs its normal request path: gate only a Dispatch
+    // whose pipeline already names a translated compute program.
+    if (command == IndirectCommand::dispatch && pass.pipeline && pass.pipeline->own().compute_request_key &&
+        !compute_builder_dispatch_allowed(self, "ExecuteIndirect"))
         return refuse("the compute builder gate refused the Dispatch", indirect_compute_pipeline, indirect_other_refusal_code::builder_gate);
     const bool translated_compute = command == IndirectCommand::dispatch && pass.pipeline && pass.pipeline->own().compute_request_key;
     const bool translated = (command == IndirectCommand::draw || indexed) && pass.pipeline && !pass.pipeline->own().real &&
@@ -4131,8 +4134,11 @@ void __stdcall list_root_cbv(Wrapper* self, UINT parameter, u64 address)
 void __stdcall list_dispatch(Wrapper* self, UINT x, UINT y, UINT z)
 {
     auto* list = recording(self);
-    if (list && !compute_builder_dispatch_allowed(self, "Dispatch")) return;
     const Pass& pass = pass_of(self);
+    // A placeholder builder pipeline still needs its normal request path: gate only a Dispatch
+    // whose pipeline already names a translated compute program.
+    if (list && pass.pipeline && pass.pipeline->own().compute_request_key &&
+        !compute_builder_dispatch_allowed(self, "Dispatch")) return;
     if (list && pass.pipeline && pass.pipeline->own().compute_request_key) {
         record_translated_dispatch(self, {{x, y, z}});
         return;
