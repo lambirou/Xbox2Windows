@@ -1,5 +1,4 @@
 #include <d3d12.h>
-#include <d3d12sdklayers.h>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -483,105 +482,6 @@ int draw_formatted_view(void* guest, void* list)
     view.Buffer.Flags = raw ? D3D12_BUFFER_SRV_FLAG_RAW : D3D12_BUFFER_SRV_FLAG_NONE;
     invoke(guest, 18, ptr(placed), ptr(&view), cpu);
     invoke(list, 12, 3, 1);
-    return 0;
-}
-
-// X2W_TEST_TABLE_ALIAS_WRITE: a buffer view the title creates over a placed buffer, at table entry 0
-// (tests/startup_table_alias_check.py).
-//   1             a raw view of the whole 256-byte buffer. The title writes the record, draws the left half, writes
-//                 it again, draws the right half, and writes it a third time after recording, before the list runs.
-//                 A per-draw copy shows the first two values; a live alias shows the third in both halves.
-//   shared-index  the same buffer is also the index buffer of one indexed draw (indices 0-2 at offset 0). The alias
-//                 must be in both the index-buffer and the shader-resource states at that draw.
-//   odd-size      a 254-byte buffer under a structured view of 127 two-byte records. The desktop raw view covers
-//                 256 bytes, past the alias, so the draw takes a copy: it shows the value written before recording.
-// With X2W_TEST_DEBUG_LAYER, errors the debug layer stored for the device from the fixture's start
-// (ID3D12InfoQueue; the message callback of ID3D12InfoQueue1 needs a newer runtime).
-ID3D12InfoQueue* table_alias_messages = nullptr;
-
-void table_alias_debug_report()
-{
-    if (!table_alias_messages) return;
-    int errors = 0;
-    const UINT64 stored = table_alias_messages->GetNumStoredMessages();
-    for (UINT64 i = 0; i < stored; ++i) {
-        SIZE_T bytes = 0;
-        if (FAILED(table_alias_messages->GetMessage(i, nullptr, &bytes)) || !bytes) continue;
-        std::vector<unsigned char> storage(bytes);
-        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-        if (FAILED(table_alias_messages->GetMessage(i, message, &bytes)) || message->Severity > D3D12_MESSAGE_SEVERITY_ERROR)
-            continue;
-        if (++errors <= 8) std::printf("debug layer id %d: %.300s\n", static_cast<int>(message->ID), message->pDescription);
-    }
-    std::printf("table alias debug layer errors: %d\n", errors);
-}
-
-int draw_table_alias_writes(ID3D12Device* desktop, void* guest, void* list)
-{
-    D3D12_FEATURE_DATA_EXISTING_HEAPS heaps{};
-    if (FAILED(desktop->CheckFeatureSupport(D3D12_FEATURE_EXISTING_HEAPS, &heaps, sizeof(heaps))) || !heaps.Supported)
-        return 77;
-    if (GetEnvironmentVariableW(L"X2W_TEST_DEBUG_LAYER", nullptr, 0)) {
-        if (FAILED(desktop->QueryInterface(IID_PPV_ARGS(&table_alias_messages)))) {
-            std::printf("no debug layer message queue: skipped\n");
-            return 77;
-        }
-        table_alias_messages->SetMessageCountLimit(4096);
-        table_alias_messages->ClearStoredMessages();
-    }
-    char mode[16]{};
-    GetEnvironmentVariableA("X2W_TEST_TABLE_ALIAS_WRITE", mode, sizeof(mode));
-    const bool shared_index = !std::strcmp(mode, "shared-index");
-    const bool odd_size = !std::strcmp(mode, "odd-size");
-    if (!shared_index && !odd_size && std::strcmp(mode, "1")) return 70;
-    // VirtualAlloc memory, so the placement can alias it (an existing heap cannot open image memory).
-    auto* const records = static_cast<std::uint32_t*>(VirtualAlloc(nullptr, 65536, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    if (!records) return 71;
-    const D3D12_RESOURCE_DESC desc{D3D12_RESOURCE_DIMENSION_BUFFER, 0, odd_size ? 254u : 256u, 1, 1, 1,
-        DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
-    void* placed = nullptr;
-    if (FAILED(static_cast<HRESULT>(invoke(guest, 133, ptr(records), ptr(&desc), D3D12_RESOURCE_STATE_COMMON,
-                                           0, ptr(&__uuidof(ID3D12Resource)), ptr(&placed))))) return 47;
-    Word cpu = 0;
-    if (!bind_view_table(guest, list, cpu)) return 42;
-    D3D12_SHADER_RESOURCE_VIEW_DESC view{odd_size ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS,
-                                         D3D12_SRV_DIMENSION_BUFFER, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING};
-    view.Buffer.NumElements = odd_size ? 127 : 64;
-    view.Buffer.StructureByteStride = odd_size ? 2 : 0;
-    view.Buffer.Flags = odd_size ? D3D12_BUFFER_SRV_FLAG_NONE : D3D12_BUFFER_SRV_FLAG_RAW;
-    invoke(guest, 18, ptr(placed), ptr(&view), cpu);
-    if (shared_index || odd_size) {
-        auto* const indices = reinterpret_cast<std::uint16_t*>(records);
-        for (std::uint16_t i = 0; i < 3; ++i) indices[i] = i;
-        records[4] = 40;
-        records[5] = 41;
-        const D3D12_RECT full{0, 0, 8, 4};
-        invoke(list, 22, 1, ptr(&full));
-        if (shared_index) {
-            const D3D12_INDEX_BUFFER_VIEW index_view{ptr(records), 6, DXGI_FORMAT_R16_UINT};
-            invoke(list, 47, ptr(&index_view));
-            invoke(list, 13, 3, 1, 0, 0, 0);
-        } else {
-            invoke(list, 12, 3, 1);
-            records[4] = 120;  // after recording: only a live alias would show it
-            records[5] = 121;
-        }
-        return 0;
-    }
-    const auto write = [&](std::uint32_t value) {
-        records[4] = value;
-        records[5] = value + 1;
-    };
-    const auto draw = [&](LONG left, LONG right) {
-        const D3D12_RECT strip{left, 0, right, 4};
-        invoke(list, 22, 1, ptr(&strip));
-        invoke(list, 12, 3, 1);
-    };
-    write(40);
-    draw(0, 4);
-    write(80);
-    draw(4, 8);
-    write(120);  // after recording: only a binding that reads at execution sees it
     return 0;
 }
 

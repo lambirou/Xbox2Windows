@@ -13,7 +13,6 @@ runs share one cache:
 4. texture-store-denied (a texture without unordered access, whose view the stand-in does not create): refused
    with one logged reason, every half keeps its sentinel.
 A fifth run binds the same program under a manifest edited to declare no entry values.
-The 1D and 3D float texture cases check mip-one readback, a mismatched view, and an invalid 3D W range.
 
 Texture input: case A of startup_gfx2hlsl_compute_check.py with a level-zero sample of a 2D texture XORed into the
 stored word (a static sampler, a texture view at table byte 64). The consumer adds a 1x1 RGBA8 texture whose red
@@ -35,7 +34,6 @@ import tempfile
 
 import startup_compute_image_store_d16_check as S
 import startup_gfx2hlsl_compute_check as C
-import startup_gfx2hlsl_image_store_3d1d_check as V
 from startup_compute_dispatch_check import lines
 from startup_compute_request_check import DATA, prepare
 from startup_compute_translate_check import state_a
@@ -148,54 +146,6 @@ def store(directory, consumer, dxc, env):
     clean(result)
     print(f'texture output: all {halves} halves match after translation (64 changed) and without entry values; '
           f'untouched before translation, without a Dispatch and for a refused view; debug layer: {layer}')
-
-
-def store_3d1d(directory, consumer, dxc, env, form):
-    cache, base = prepare(directory)
-    env = dict(base, **env)
-    (directory / 'compute_root').write_bytes(C.root_blob(3, table_range=True))
-    env['X2W_TEST_COMPUTE_ROOT'] = str(directory / 'compute_root')
-    (directory / 'program').write_bytes(V.program(form))
-    (directory / 'data').write_bytes(DATA)
-    (directory / 'state').write_bytes(state_a(V.group(form), V.A.RSRC2))
-
-    volume = form != 'line'
-    mode = 'texture-volume' if volume else 'texture-line'
-    width, height, depth = 32, 8 if volume else 1, 6 if volume else 1
-    plane_words = width * height * 4
-    initial = [0xbf000000 | (z << 12) | i for z in range(depth) for i in range(plane_words)]
-    expected = initial.copy()
-    for y in range(V.group(form)[1]):
-        # The 3D view starts at W slice 1 and the shader writes relative z=1.
-        start = (2 * plane_words if volume else 0) + y * width * 4
-        expected[start:start + 32] = V.VALUES * 8
-    layout = '<%dI' % len(initial)
-    got, result = run(directory, consumer, env, mode, layout)
-    assert got == initial and len(lines(result, 'Dispatch(2, 1, 1) refused: no translation')) == 1
-    key = int(lines(result, 'x2w-draw compute request')[0].split()[3], 16)
-    translate(cache, dxc, key)
-    manifest = (cache / f'{key:016x}.txt').read_text().splitlines()
-    dim = '3d' if volume else '1d'
-    assert f'uav 0 tex{dim} float table 1 64 channels 4' in manifest, manifest
-    got, result = run(directory, consumer, env, mode, layout)
-    assert len(lines(result, 'Dispatch(2, 1, 1) translated')) == 1, result.stderr[-3000:]
-    assert got == expected, (form, sum(a != b for a, b in zip(got, expected, strict=True)))
-    clean(result)
-
-    mismatch = initial[:32 * 8 * 4] if volume else [0xbf000000 | i for i in range(32 * 8 * 4)]
-    cases = [('texture-array-2d', mismatch, f'an output texture view or resource is not {dim.upper()}')]
-    if volume:
-        # Manual mutant: skipping the mip-relative W-range check must fail the required refusal.
-        cases.append(('texture-volume-bad-w', initial, 'an output 3D texture W range is outside the mip'))
-    else:
-        # Manual mutant: dropping the 1D mip check before `created` must fail this required refusal.
-        cases.append(('texture-line-bad-mip', initial, 'an output 1D texture mip is outside the resource'))
-    for bad_mode, untouched, reason in cases:
-        got, result = run(directory, consumer, env, bad_mode, '<%dI' % len(untouched))
-        refusal = lines(result, 'Dispatch(2, 1, 1) refused:')
-        assert len(refusal) == 1 and refusal[0].endswith(reason), result.stderr[-3000:]
-        assert got == untouched and not lines(result, 'Dispatch(2, 1, 1) translated')
-    print(f'{form}: {len(expected)} mip-one words match; incompatible views refused with sentinels intact')
 
 
 # v_xor_b32 v5, v5, v12: the assembled `v_xor_b32 v5, v5, v6` of case A with its second source register changed
@@ -319,8 +269,6 @@ def main(consumer, dxc, adapter):
         env['X2W_TEST_DISPATCH_HARDWARE'] = '1'
     with tempfile.TemporaryDirectory() as temporary:
         store(Path(temporary) / 'store', consumer, dxc, env)
-        for form in V.FORMS:
-            store_3d1d(Path(temporary) / form, consumer, dxc, env, form)
         sample(Path(temporary) / 'sample', consumer, dxc, env)
         filtered(Path(temporary) / 'filtered', consumer, dxc, env)
     print(f'startup_compute_dispatch_texture: PASS on {adapter}')

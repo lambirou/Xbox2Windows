@@ -89,6 +89,8 @@ def controls(llvm_mc):
         (fixture.STORE.replace('v[14:15]', 'v14').replace('dmask:0xf', 'dmask:0x3'),
          '080320f0080e0680', 'typed UAV store writes all four channels'),
         (fixture.STORE.replace('v[8:9]', 'v8').replace(' d16', ' a16 d16'), '080f20f0080e06c0', 'modifier a16'),
+        (fixture.STORE.replace('v[8:9]', 'v[8:10]').replace('IMG_2D', 'IMG_3D'),
+         '100f20f0080e0680', 'only 2D images'),
     ):
         instruction = encoded(asm, code)
         refused(reason, lambda: pipeline(instruction))

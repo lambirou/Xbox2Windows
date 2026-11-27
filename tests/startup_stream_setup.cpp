@@ -117,15 +117,6 @@ int prepare_stream_pipeline(const char* vs_path, const char* ps_path, const char
             return 77;
         }
         debug->EnableDebugLayer();
-        // X2W_TEST_GPU_VALIDATION=1: also check the states of resources reached through descriptor tables.
-        ComPtr<ID3D12Debug1> debug1;
-        if (GetEnvironmentVariableW(L"X2W_TEST_GPU_VALIDATION", nullptr, 0)) {
-            if (FAILED(debug.As(&debug1))) {
-                std::printf("no GPU-based validation: skipped\n");
-                return 77;
-            }
-            debug1->SetEnableGPUBasedValidation(TRUE);
-        }
     }
 
     if (const int rc = pick_stream_adapter(hardware, adapter)) return rc;

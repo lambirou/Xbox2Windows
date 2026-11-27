@@ -42,8 +42,8 @@ foreach ($dll in "xmem", "d3d12_xs", "AcpHal", "XCRDAPI", "chad", "xapu", "xg_xs
 $env:X2W_AUDIO_PERMISSIVE = "1"; $env:X2W_D3D12_DEVICE_NOOP = "1"; $env:X2W_D3D12_LIST_NOOP = "1"
 $env:X2W_D3D12_PERMISSIVE = "1"; $env:X2W_XMEM_PERMISSIVE = "1"; $env:X2W_RUNTIME_PROXY = "1"
 $config = Join-Path $DataDir "MicrosoftGame.config"
-if (Test-Path -LiteralPath $config) {
-    $text = Get-Content -LiteralPath $config -Raw
+if (Test-Path $config) {
+    $text = Get-Content $config -Raw
     if ($text -match "<TitleId>([^<]*)") { $env:X2W_TITLE_ID = $Matches[1] }
     if ($text -match "<SizeMB>([^<]*)") { $env:X2W_STORAGE_MB = $Matches[1] }
 }

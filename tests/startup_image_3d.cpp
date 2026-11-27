@@ -64,7 +64,7 @@ ComPtr<ID3D12RootSignature> create_root(ID3D12Device* device, const x2w_startup:
 
 // array: the same eight texels as two slices of a 2D array (dim:SQ_RSRC_IMG_2D_ARRAY); the default
 // view of a two-slice texture is a Texture2DArray over both. Multi-mip fixtures use a 4x4 base.
-// A nonzero view_levels selects an explicit 2D or 2D-array SRV starting at first_mip. When sampler_line is a
+// A nonzero view_levels selects an explicit 2D SRV starting at first_mip. When sampler_line is a
 // comparison sampler (smpc), the texture uses DXGI_FORMAT_R32_FLOAT holding the red channel as depth.
 void check_startup_image_3d(ID3D12Device* device, const char* vertex_path, const char* pixel_path, float z,
                             float color[4], const char* sampler_line, bool array, UINT levels, bool one_dimensional,
@@ -72,30 +72,14 @@ void check_startup_image_3d(ID3D12Device* device, const char* vertex_path, const
 {
     if (levels < 1 || levels > max_levels || (levels > 1 && !array && !two_dimensional && !one_dimensional))
         throw std::runtime_error("Unsupported image mip level count");
-    if (view_levels && ((!two_dimensional && !array) || first_mip >= levels || view_levels > levels - first_mip))
+    if (view_levels && (!two_dimensional || first_mip >= levels || view_levels > levels - first_mip))
         throw std::runtime_error("2D mip window exceeds the resource");
     const UINT base = levels > 1 ? mip_base : side;
     const auto vs = read_blob(vertex_path);
     const auto ps = read_blob(pixel_path);
     x2w_startup::TranslatedSamplers samplers;
-    const char* newline = std::strchr(sampler_line, '\n');
-    if (!newline) {
-        if (!samplers.read_manifest_line(sampler_line) || samplers.statics.size() != 1)
-            throw std::runtime_error("Expected one inline sampler in the image 3D draw");
-    } else {
-        const std::string first(sampler_line, newline);
-        const char* second = newline + 1;
-        int first_index = -1, second_index = -1;
-        if (!two_dimensional || !view_levels || std::strchr(second, '\n') ||
-            (std::sscanf(first.c_str(), "smp %d", &first_index) != 1 &&
-             std::sscanf(first.c_str(), "smpl %d", &first_index) != 1) ||
-            (std::sscanf(second, "smp %d", &second_index) != 1 &&
-             std::sscanf(second, "smpl %d", &second_index) != 1) ||
-            first_index != 0 || second_index != 1 ||
-            !samplers.read_manifest_line(first.c_str()) || !samplers.read_manifest_line(second) ||
-            samplers.statics.size() != 2 || samplers.heap || samplers.comparison[0] || samplers.comparison[1])
-            throw std::runtime_error("Expected two ordered noncomparison inline samplers in the 2D view draw");
-    }
+    if (!samplers.read_manifest_line(sampler_line) || samplers.statics.size() != 1)
+        throw std::runtime_error("Expected one inline sampler in the image 3D draw");
     const bool comparison = !samplers.comparison.empty() && samplers.comparison[0];
     const auto root = create_root(device, samplers);
 
@@ -177,16 +161,10 @@ void check_startup_image_3d(ID3D12Device* device, const char* vertex_path, const
     D3D12_SHADER_RESOURCE_VIEW_DESC view{};
     if (view_levels) {
         view.Format = td.Format;
-        view.ViewDimension = array ? D3D12_SRV_DIMENSION_TEXTURE2DARRAY : D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (array) {
-            view.Texture2DArray.MostDetailedMip = first_mip;
-            view.Texture2DArray.MipLevels = view_levels;
-            view.Texture2DArray.ArraySize = td.DepthOrArraySize;
-        } else {
-            view.Texture2D.MostDetailedMip = first_mip;
-            view.Texture2D.MipLevels = view_levels;
-        }
+        view.Texture2D.MostDetailedMip = first_mip;
+        view.Texture2D.MipLevels = view_levels;
     }
     device->CreateShaderResourceView(texture.Get(), view_levels ? &view : nullptr, views->GetCPUDescriptorHandleForHeapStart());
     hd = {D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE};

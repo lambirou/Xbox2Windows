@@ -79,28 +79,7 @@ def _bounded_code(image, start):
     return image[start:end]
 
 
-def _calculated_early_out(code, instructions):
-    """Cross-check the decoded extent and instruction inventory before accepting a calculated continuation."""
-    if not any(line.startswith("s_getpc_b64 ") for line in instructions.values()):
-        return None
-    # gfx2hlsl imports pixel_aot symbols lazily too.
-    from startup import gfx2hlsl as G
-    ins = G.decode(code)
-    if [(off, name) for off, _n, name, _asm in ins] != [(off, line.split()[0]) for off, line in instructions.items()]:
-        raise ValueError("Calculated early-out: LLVM and the repository decoder disagree on the instruction inventory")
-    if ins[-1][0] + ins[-1][1] != len(code):
-        raise ValueError("Calculated early-out: the decoded instructions do not consume the bounded span")
-    try:
-        calculated = G.calculated_pc_proof(ins, None)
-        profile = G.terminal_continuation_proof(ins, calculated)
-    except G.Unsupported as reason:
-        raise ValueError(str(reason)) from None
-    if profile is None:
-        raise ValueError("Calculated early-out: no proven transfer onto a terminating continuation")
-    return profile
-
-
-def _check_two_exits(code, llvm, *, cpu, features, mesh=False, early_out=False):
+def _check_two_exits(code, llvm, *, cpu, features, mesh=False):
     """Both decoded exits must be reachable from the single entry."""
     instructions = dict(disassemble(code, llvm, offsets=True, cpu=cpu, features=features))
     exits = [pc for pc, line in instructions.items() if line == "s_endpgm"]
@@ -111,7 +90,6 @@ def _check_two_exits(code, llvm, *, cpu, features, mesh=False, early_out=False):
     mesh_alloc = "s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)"
     if mesh and mesh_alloc not in instructions.values():
         raise ValueError("Unverified multi-exit program: missing mesh allocation")
-    early_out = _calculated_early_out(code, instructions) if early_out and not mesh else None
     # An aligned word can be a literal or the second half of an instruction.
     # Follow branches only from decoded PCs and reject unresolved transfers.
     pcs = list(instructions)
@@ -134,22 +112,17 @@ def _check_two_exits(code, llvm, *, cpu, features, mesh=False, early_out=False):
             pending.append(target)
             if op == "s_branch":
                 continue
-        elif early_out is not None and pc == early_out[0]:
-            targets.add(early_out[1])
-            pending.append(early_out[1])
-            continue
-        elif not (early_out is not None and pc in early_out[2]) and not (
-                (mesh and instructions[pc] in ("s_barrier", mesh_alloc))
-                or op.startswith(("v_", "image_", "buffer_", "tbuffer_", "ds_", "flat_", "global_",
-                                  "scratch_", "exp", "s_load_", "s_buffer_load_", "s_cmp", "s_bitcmp",
-                                  "s_mov_", "s_and", "s_or_", "s_xor_", "s_not_", "s_lsh", "s_ash",
-                                  "s_add", "s_sub", "s_mul", "s_min_", "s_max_", "s_cselect", "s_bfe",
-                                  "s_bfm", "s_brev", "s_ff", "s_bcnt", "s_wqm", "s_quadmask"))
-                or op in ("s_nop", "s_version", "s_inst_prefetch", "s_waitcnt", "s_clause", "s_delay_alu",
-                          "s_setprio", "s_sleep", "s_movk_i32", "s_cmovk_i32", "s_mulk_i32",
-                          "s_flbit_i32_b32", "s_abs_i32", "s_cmov_b32", "s_bitset0_b32", "s_bitset1_b32",
-                          "s_bitreplicate_b64_b32", "s_bitset0_b64", "s_bitset1_b64",
-                          "s_setreg_imm32_b32", "s_setreg_b32", "s_getreg_b32")):
+        elif not ((mesh and instructions[pc] in ("s_barrier", mesh_alloc))
+                  or op.startswith(("v_", "image_", "buffer_", "tbuffer_", "ds_", "flat_", "global_",
+                                 "scratch_", "exp", "s_load_", "s_buffer_load_", "s_cmp", "s_bitcmp",
+                                 "s_mov_", "s_and", "s_or_", "s_xor_", "s_not_", "s_lsh", "s_ash",
+                                 "s_add", "s_sub", "s_mul", "s_min_", "s_max_", "s_cselect", "s_bfe",
+                                 "s_bfm", "s_brev", "s_ff", "s_bcnt", "s_wqm", "s_quadmask"))
+                  or op in ("s_nop", "s_version", "s_inst_prefetch", "s_waitcnt", "s_clause", "s_delay_alu",
+                            "s_setprio", "s_sleep", "s_movk_i32", "s_cmovk_i32", "s_mulk_i32",
+                            "s_flbit_i32_b32", "s_abs_i32", "s_cmov_b32", "s_bitset0_b32", "s_bitset1_b32",
+                            "s_bitreplicate_b64_b32", "s_bitset0_b64", "s_bitset1_b64",
+                            "s_setreg_imm32_b32", "s_setreg_b32", "s_getreg_b32")):
             raise ValueError(f"Unverified multi-exit control flow: {op}")
         pending.append(following[pc])
     # A direct branch may skip alignment NOPs. Keep them in the original span.
@@ -216,9 +189,8 @@ def container_code(program, *, stage, llvm=None, cpu=b"gfx1013", features=b""):
         if markers == 1:
             return code
         mesh = stage == 13 and cpu == b"gfx1013" and features == MESH_WAVE64
-        pixel = stage == 0 and cpu == b"gfx1013" and not features
         if (stage in (0, 5) or mesh) and markers == 2 and llvm is not None:
-            _check_two_exits(code, llvm, cpu=cpu, features=features, mesh=mesh, early_out=pixel)
+            _check_two_exits(code, llvm, cpu=cpu, features=features, mesh=mesh)
             return code
         raise ValueError("Unverified multi-exit program")
     # Older fixtures lack the section extent; preserve their unique-marker rule.

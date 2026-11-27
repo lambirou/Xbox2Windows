@@ -150,13 +150,17 @@ def controls(llvm_mc):
         (fixture.STORE.replace('v[14:17]', 'v[14:15]').replace('dmask:0xf', 'dmask:0x3'),
          '080320f0080e0600', 'typed UAV store writes all four channels'),
         (fixture.STORE.replace('v[8:9]', 'v8') + ' a16', '080f20f0080e0640', 'modifier a16'),
+        (fixture.STORE.replace('v[8:9]', 'v[8:10]').replace('IMG_2D', 'IMG_3D'),
+         '100f20f0080e0600', 'only 2D images'),
     ):
         instruction = encoded(asm, code)
         refused(reason, lambda: pipeline(instruction))
 
-    refused('only 1D, 2D, 2D-array and 3D images',
-            lambda: pipe.cs.op_image_store(['v[14:17]', 'v[8:10]', 's[24:31]'],
-                                           ['dmask:0xf', 'dim:SQ_RSRC_IMG_CUBE']))
+    # 1D, 3D and cube keep the same refusal with the address count their form would take.
+    for dim, address in (('SQ_RSRC_IMG_1D', 'v8'), ('SQ_RSRC_IMG_3D', 'v[8:10]'),
+                         ('SQ_RSRC_IMG_CUBE', 'v[8:10]')):
+        refused('only 2D images',
+                lambda: pipe.cs.op_image_store(['v[14:17]', address, 's[24:31]'], ['dmask:0xf', 'dim:' + dim]))
 
     wait = encoded('s_waitcnt lgkmcnt(0)', '7fc08cbf')
     changed = encoded('s_mov_b32 s26, 0', '80039abe')

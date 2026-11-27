@@ -9,17 +9,12 @@
 // buffers named by the hardware descriptors in its tables, textures behind view tokens) into an
 // upload ring / a private descriptor heap.
 
-#include "startup_stubs/typed_uav_load.h"
-
 // A pixel-stage image store (#1996 item F, #2742): tools/startup/gfx2hlsl.py writes 'uav N tex2d|tex2da table P O'
 // for the RWTexture2D<float4> or RWTexture2DArray<float4> at u<N>, whose descriptor is at byte O of the title's
 // root table P. Only that form is read; a view qualifier or a 'channels' field, as in the compute line, is refused.
-// A trailing 'typedload' means the binding must also support a typed UAV load. The translator does not emit it
-// for a component store, which does not read the texel.
 struct PixelUav {
     unsigned index = 0, parameter = 0, offset = 0;
     bool array = false;
-    bool needs_typed_load = false;
 };
 constexpr unsigned pixel_uav_limit = 8;
 
@@ -45,10 +40,9 @@ const char* read_pixel_uav_line(const std::string& line, PixelUav& out)
     if (w.size() > 3 && (w[3] == "float" || w[3] == "uint" || w[3] == "sint")) return "a view qualifier is not read for pixel stores";
     if (w.size() < 4 || w[3] != "table") return "view source is not a table";
     if (w.size() < 6) return "missing table parameter or offset";
-    if (w.size() > 7 || (w.size() == 7 && w[6] != "typedload")) return "unexpected field after the table offset";
+    if (w.size() > 6) return "unexpected field after the table offset";
     if (!number(w[4], out.parameter) || out.parameter >= 16) return "table parameter out of range";
     if (!number(w[5], out.offset)) return "malformed table offset";
-    out.needs_typed_load = w.size() == 7;
     return nullptr;
 }
 
@@ -97,7 +91,7 @@ bool srgb_uav_format(DXGI_FORMAT format)
 // for a manifest 'tex2da' view. Returns nullptr and fills out, or the reason the binding is refused.
 const char* pixel_uav_view(ID3D12Device* device, const D3D12_RESOURCE_DESC& resource,
                            const D3D12_UNORDERED_ACCESS_VIEW_DESC* title_view, bool array,
-                           D3D12_UNORDERED_ACCESS_VIEW_DESC& out, bool needs_typed_load = false)
+                           D3D12_UNORDERED_ACCESS_VIEW_DESC& out)
 {
     if (resource.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return "resource is not a 2D texture";
     if (!array && resource.DepthOrArraySize != 1) return "resource is a texture array";
@@ -127,17 +121,6 @@ const char* pixel_uav_view(ID3D12Device* device, const D3D12_RESOURCE_DESC& reso
     if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) ||
         !(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE))
         return "format has no typed UAV store on this device";
-    // Before the view is filled, and therefore before the draw. A component store does not set
-    // needs_typed_load: it never reads the texel. A binding that does is refused when this device
-    // cannot load the format.
-    if (needs_typed_load) {
-        D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
-        const bool additional = SUCCEEDED(device->CheckFeatureSupport(
-                                    D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))) &&
-                                options.TypedUAVLoadAdditionalFormats;
-        if (const char* load = typed_uav_load_refusal(format, support.Support2, additional))
-            return load;
-    }
     out = {};
     out.Format = format;
     if (array) {
@@ -154,7 +137,7 @@ struct Translation {
     enum UdKind { rect, base_vertex, start_instance, root_constant, stride, mrt_bits, d16_unorm16, desc_word3 };
     struct Ud { int kind, a, b; };
     int state = 0;                           // 1 ready, 2 unavailable
-    x2w_startup::ManifestRetry manifest_retry;  // Only an absent manifest can become ready on a later draw.
+    ULONGLONG retry_manifest_at = 0;         // Only an absent manifest can become ready on a later draw.
     std::vector<Srv> srvs;
     std::vector<PixelUav> uavs;              // manifest 'uav N tex2d table P O' (#1996 F): u0.. after the SRVs
     std::vector<Ud> uds;
@@ -382,18 +365,18 @@ void load_translation(Translation& tr, const std::string& rtv_request = {})
     std::string manifest;
     if (!cache_path(path, L"", tr.key, L".txt")) return;
     if (!read_text(path, manifest)) {
-        if (!tr.manifest_retry.pending()) {
+        if (!tr.retry_manifest_at) {
             InterlockedIncrement(&translation_missing);
             static LONG missing;
             if (rtv_request.empty() && first_calls(missing, 12))
                 log("x2w-draw no translation for pipeline %016llx", tr.key);
         }
-        tr.manifest_retry.missed(GetTickCount64());
+        tr.retry_manifest_at = GetTickCount64() + 1000;
         return;
     }
     // The writer publishes this marker last. A malformed published result stays rejected.
-    const bool previously_missing = tr.manifest_retry.pending();
-    tr.manifest_retry.found();
+    const bool previously_missing = tr.retry_manifest_at != 0;
+    tr.retry_manifest_at = 0;
     bool matched_rtv = false;
     for (std::size_t at = 0; at < manifest.size();) {
         std::size_t end = manifest.find('\n', at);
@@ -489,7 +472,7 @@ Translation* cached_translation(const void* a, std::size_t a_bytes, const void* 
 {
     // Keep pre-fix desktop bytecode and manifests out of this ABI's cache.
     // tools/startup/gfx2hlsl.py hashes the same bytes, without a trailing NUL.
-    constexpr char revision[] = "x2w-startup-shader-29";
+    constexpr char revision[] = "x2w-startup-shader-28";
     const u64 seed = fnv_bytes(revision, sizeof(revision) - 1);
     u64 key = fnv_bytes(root_blob.data(), root_blob.size(), fnv_bytes(b, b_bytes, fnv_bytes(a, a_bytes, seed)));
     // A stream's input layout (stream_input_layout) feeds the vertex fetch, so it is part of the key.
@@ -610,7 +593,7 @@ u64 publish_compute_request(const void* desc)
     std::vector<unsigned char> fields(sizeof(words));
     words[0] = words[1] = words[3] = words[5] = words[7] = words[9] = words[10] = 0;
     std::memcpy(fields.data(), words, sizeof(words));
-    constexpr char compute_revision[] = "x2w-startup-shader-29cs";  // tools/startup/gfx2hlsl.py compute_key
+    constexpr char compute_revision[] = "x2w-startup-shader-28cs";  // tools/startup/gfx2hlsl.py compute_key
     u64 key = fnv_bytes(compute_revision, sizeof(compute_revision) - 1);
     const std::vector<unsigned char>* order[] = {&code, &data, &root_blob, &fields, &state_a, &state_b};
     for (const auto* part : order) key = fnv_part(*part, key);
@@ -1014,7 +997,7 @@ Translation* translation_for_targets(Translation* base, const Pass& pass)
 {
     if (!base) return nullptr;
     if (std::none_of(pass.target_formats, pass.target_formats + pass.target_count, needs_rtv_variant)) {
-        if (base->manifest_retry.due(GetTickCount64()))
+        if (base->retry_manifest_at && GetTickCount64() >= base->retry_manifest_at)
             load_translation(*base);
         return base;
     }
@@ -1031,7 +1014,7 @@ Translation* translation_for_targets(Translation* base, const Pass& pass)
             publish_shader_request(key, L".rtv", request.data(), request.size());
             log("x2w-draw no RTV translation for %016llx (%s)", key, request.c_str());
         }
-    } else if (entry->manifest_retry.due(GetTickCount64())) {
+    } else if (entry->retry_manifest_at && GetTickCount64() >= entry->retry_manifest_at) {
         load_translation(*entry, request);
     }
     return entry;
@@ -2356,8 +2339,7 @@ bool resolve_pixel_uavs(const Translation& tr, const Pass& pass, PixelUavBinding
             title_view.Format = desktop_format(title_view.Format);
         }
         const D3D12_RESOURCE_DESC desc = texture->GetDesc();
-        const char* reason = pixel_uav_view(device_of(the_device), desc, described ? &title_view : nullptr,
-                                            uav.array, out[i].view, uav.needs_typed_load);
+        const char* reason = pixel_uav_view(device_of(the_device), desc, described ? &title_view : nullptr, uav.array, out[i].view);
         if (reason) {
             static LONG refused_view;
             if (first_calls(refused_view, 16))
@@ -2502,7 +2484,6 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
     const bool indices_ok = indexed && !indirect && pass.ib.BufferLocation && readable_window(index_address, index_total) >= index_total;
     D3D12_INDEX_BUFFER_VIEW live_indices{};
     ID3D12Resource* live_index_resource = nullptr;
-    bool index_read_as_table = false;  // live_index_resource is also bound as a table SRV (X2W_D3D12_TABLE_ALIAS)
     const auto stream_needs_slicing = [&](const Translation::Srv& srv) {
         if (srv.source != 1) return false;
         if (srv.a < 0 || srv.a >= 8) return true;
@@ -2750,7 +2731,6 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
             strides[i] = (words[1] >> 16) & 0x3fff;
             bytes = static_cast<std::size_t>(strides[i] ? strides[i] : 1) * words[2];
         }
-        const std::size_t view_bytes = bytes;  // before the 16 MiB copy cap
         if (bytes > (16u << 20)) {
             bytes = 16u << 20;
             // Formatted loads past the copy would read zeros on the desktop; refuse the draw instead.
@@ -2773,31 +2753,6 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
             buffer_facts.bound = bound;
             count_null_binding(x2w_local::classify_null_binding(buffer_facts));
         };
-        // X2W_D3D12_TABLE_ALIAS=1: a table buffer whose whole range lies in a placed buffer that aliases title memory
-        // binds that alias, as vertex streams do, instead of a frame copy. The GPU then reads the bytes at execution,
-        // not as they were when the draw was recorded, and the range is not cut at 16 MiB.
-        static const bool table_alias = x2w_local::env_on("X2W_D3D12_TABLE_ALIAS");
-        // The raw view covers whole DWORDs, so the alias must hold the rounded range.
-        const std::size_t raw_bytes = (view_bytes + 3) & ~std::size_t{3};
-        if (table_alias && srv.source == 0 && !formatted.entry && address && view_bytes && raw_bytes <= (512u << 20)) {
-            const auto table_placed = placed_buffer_range(self->own().list_device, address, raw_bytes);
-            if (!table_placed.reject && table_placed.alias && table_placed.owner &&
-                InterlockedCompareExchange(&table_placed.owner->own().refs, 0, 0)) {
-                const u64 view_offset = address - reinterpret_cast<u64>(table_placed.owner->own().title_memory);
-                if (view_offset % D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT == 0 &&
-                    retain_with_recording(self, x2w_startup::ComPtr<ID3D12Resource>(table_placed.alias))) {
-                    // The same alias can also be this draw's live index buffer; it then keeps both read states.
-                    const bool shared_index = table_placed.alias == live_index_resource;
-                    index_read_as_table |= shared_index;
-                    require_state(self, table_placed.alias, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                                  (shared_index ? D3D12_RESOURCE_STATE_INDEX_BUFFER : D3D12_RESOURCE_STATE_COMMON));
-                    buffer_view(dest, table_placed.alias, view_offset, raw_bytes);
-                    count_buffer(true);
-                    continue;
-                }
-            }
-        }
         if (placed.reject || (placed.owner && !InterlockedCompareExchange(&placed.owner->own().refs, 0, 0))) {
             buffer_view(dest, nullptr, 0, 0);
             count_buffer(false);
@@ -2945,10 +2900,7 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
         ID3D12Resource* index_chunk = nullptr;
         auto view = live_indices;
         if (live_index_resource) {
-            require_state(self, live_index_resource, D3D12_RESOURCE_STATE_INDEX_BUFFER |
-                          (index_read_as_table ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
-                                               : D3D12_RESOURCE_STATE_COMMON));
+            require_state(self, live_index_resource, D3D12_RESOURCE_STATE_INDEX_BUFFER);
         } else if (indices_ok && frame_copy(self, index_address, index_total, &offset, &index_chunk) && index_chunk) {
             view = {index_chunk->GetGPUVirtualAddress() + offset, static_cast<UINT>(index_total),
                     index_bytes == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};

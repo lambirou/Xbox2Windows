@@ -146,7 +146,6 @@ jobs:
               (["tests/startup_compute_lds_b64_check.py", "binary", "llvm-mc-15"], {}),
               (["tests/startup_compute_lds_b128_check.py", "binary", "llvm-mc-15"], {}),
               (["tests/startup_gfx2hlsl_calculated_target_check.py", "binary", "llvm-mc-15"], {}),
-              (["tests/startup_gfx2hlsl_far_early_out_check.py", "binary", "llvm-mc-15", "libLLVM-15.so.1"], {}),
               (["tests/startup_gfx2hlsl_join_symbols_check.py", "binary", "llvm-mc-15"], {}),
               (["tests/startup_joined_table_pointer_check.py", "binary", "llvm-mc-15"], {}),
               (["tests/startup_gfx2hlsl_swap_check.py", "binary", "llvm-mc-15"], {}),
@@ -321,7 +320,6 @@ jobs:
             tests/startup_gfx2hlsl_heap_record_check.py \
             tests/startup_gfx2hlsl_heap_word_check.py \
             tests/startup_gfx2hlsl_calculated_target_check.py \
-            tests/startup_gfx2hlsl_far_early_out_check.py \
             tests/startup_triage_run_check.py \
             tests/startup_run_ps1_check.py \
             tests/startup_run_sh_check.py \
