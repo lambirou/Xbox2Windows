@@ -440,10 +440,18 @@ int main(int argc, char** argv) try
     signature_filter.DenyList.NumSeverities = 1;
     signature_filter.DenyList.pSeverityList = &signature_error;
     if (info) check(info->PushStorageFilter(&signature_filter), "mute expected signature creation diagnostic");
-    argument.Type = static_cast<D3D12_INDIRECT_ARGUMENT_TYPE>(0x69);
+    argument.Type = static_cast<D3D12_INDIRECT_ARGUMENT_TYPE>(0x6a);
     const HRESULT placeholder_hr = guest->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&placeholder));
     if (info) info->PopStorageFilter();
     check(placeholder_hr, "create placeholder command signature");
+    ComPtr<ID3D12CommandSignature> dispatch_l2;
+    if (!constants && !counted) {
+        D3D12_INDIRECT_ARGUMENT_DESC l2_argument{};
+        l2_argument.Type = static_cast<D3D12_INDIRECT_ARGUMENT_TYPE>(0x69);
+        const D3D12_COMMAND_SIGNATURE_DESC l2_desc{sizeof(D3D12_DISPATCH_ARGUMENTS), 1, &l2_argument, 0};
+        check(guest->CreateCommandSignature(&l2_desc, nullptr, IID_PPV_ARGS(&dispatch_l2)),
+              "create DispatchL2 command signature");
+    }
     const auto writer = pipeline(device.Get(), root.Get(), counted ? "write_count2" : constants ? "write_constant_args" : "write_args");
     const auto clamped_writer = pipeline(device.Get(), root.Get(), "write_count9");
     const auto zero_writer = pipeline(device.Get(), root.Get(), "write_count0");
@@ -481,6 +489,7 @@ int main(int argc, char** argv) try
     const Words record = constants ? Words{3, 7, 4, 3, 2} : Words{4, 3, 2};
     const Words other_record = constants ? Words{7, 3, 4, 3, 2} : Words{2, 3, 2};
     if (counted ? !run_counted() : (!verify(writer.Get(), record, Rejection::none, signature.Get()) ||
+        (!constants && !counted && !verify(writer.Get(), record, Rejection::none, dispatch_l2.Get())) ||
         !verify(other_writer.Get(), other_record, Rejection::none, signature.Get()) ||
         !verify(nullptr, {}, Rejection::none, signature.Get()) ||
         !verify(writer.Get(), record, Rejection::unmapped, signature.Get()) ||

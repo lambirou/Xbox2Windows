@@ -1221,15 +1221,28 @@ void __stdcall device_copyable_footprints(Wrapper* self, const D3D12_RESOURCE_DE
 }
 
 // Device slot 41, desktop CreateCommandSignature(desc, root, riid, ppv); on failure the descriptor and
-// its argument descriptors are logged. The observed console-only type 0x69 gets a placeholder before
-// desktop validation. Other types still reach the desktop even when they postdate DISPATCH_MESH.
+// its argument descriptors are logged. Console type 0x69 is DispatchL2: its flags live in the argument
+// descriptor and its 12-byte record is the desktop Dispatch record. Other unknown console types keep the
+// placeholder path.
 u64 __stdcall device_create_command_signature(Wrapper* self, const D3D12_COMMAND_SIGNATURE_DESC* desc, u64 root,
                                               u64 iid, u64 out)
 {
     void** output = reinterpret_cast<void**>(out);
     const bool readable_args = x2w_local::readable(desc, sizeof(*desc)) &&
         x2w_local::readable(desc->pArgumentDescs, std::size_t{desc->NumArgumentDescs} * sizeof(*desc->pArgumentDescs));
-    if (output && readable_args && x2w_startup::has_console_indirect_arg_type(desc->pArgumentDescs, desc->NumArgumentDescs) &&
+    D3D12_COMMAND_SIGNATURE_DESC translated_desc{};
+    D3D12_INDIRECT_ARGUMENT_DESC translated_arg{};
+    const bool dispatch_l2 = readable_args && desc->NumArgumentDescs == 1 &&
+        static_cast<unsigned>(desc->pArgumentDescs[0].Type) == 0x69 &&
+        desc->ByteStride == sizeof(D3D12_DISPATCH_ARGUMENTS);
+    if (dispatch_l2) {
+        translated_desc = *desc;
+        translated_arg = desc->pArgumentDescs[0];
+        translated_arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        translated_desc.pArgumentDescs = &translated_arg;
+    }
+    if (!dispatch_l2 && output && readable_args &&
+        x2w_startup::has_console_indirect_arg_type(desc->pArgumentDescs, desc->NumArgumentDescs) &&
         x2w_local::writable(output, sizeof(*output))) {
         static LONG placeholders;
         if (first_calls(placeholders, 8)) {
@@ -1244,7 +1257,19 @@ u64 __stdcall device_create_command_signature(Wrapper* self, const D3D12_COMMAND
         *output = wrap(nullptr, command_signature_kind);
         return *output ? u64{S_OK} : out_of_memory;
     }
-    const u64 result = create_slot<device_kind, 41, 2>(self, reinterpret_cast<u64>(desc), root, iid, out, 0, 0, 0, 0);
+    const auto* signature_desc = dispatch_l2 ? &translated_desc : desc;
+    const u64 result = create_slot<device_kind, 41, 2>(self, reinterpret_cast<u64>(signature_desc), root, iid, out, 0,
+                                                        0, 0, 0);
+    if (SUCCEEDED(static_cast<HRESULT>(result)) && dispatch_l2 && out) {
+        auto* signature = *reinterpret_cast<Wrapper**>(out);
+        if (signature && signature->own().kind == command_signature_kind) {
+            auto& state = signature->own();
+            state.indirect_command = IndirectCommand::dispatch;
+            state.indirect_bytes = sizeof(D3D12_DISPATCH_ARGUMENTS);
+            state.signature_device = self;
+            if (root) state.signature_root = reinterpret_cast<ID3D12RootSignature*>(unwrap(root));
+        }
+    }
     if (SUCCEEDED(static_cast<HRESULT>(result)) && out && desc && root && desc->NumArgumentDescs > 1) {
         // A Dispatch preceded by root constants for the signature's root (#1759 part 2). Other root argument
         // types (root views, vertex and index buffer views) and graphics commands remain unsupported here.
